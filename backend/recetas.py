@@ -42,7 +42,13 @@ SKILLS = [
         "skill": "tutorial-video-agente",
         "titulo": "Videos tutoriales",
         "bajada": "Grabar, narrar y publicar tutoriales donde el agente resuelve un proyecto.",
-        "solo_linux": True,
+        # Los mismos programas que exige plataforma.py de la skill. En Windows graba con
+        # gdigrab y tipea con SendInput (librería estándar): alcanza con ffmpeg.
+        "requiere": {
+            "todos": ["ffmpeg", "ffprobe"],
+            "linux": ["xdotool", "wmctrl"],
+            "como_instalar": "Windows: winget install Gyan.FFmpeg · Linux: sudo apt install ffmpeg xdotool wmctrl",
+        },
     },
 ]
 

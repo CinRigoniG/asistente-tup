@@ -48,6 +48,15 @@ def _mis_datos() -> dict:
         return {}
 
 
+def _programas_faltantes(requiere: dict | None) -> list[str]:
+    if not requiere:
+        return []
+    nombres = list(requiere.get("todos", []))
+    if not config.es_windows():
+        nombres += requiere.get("linux", [])
+    return [n for n in nombres if shutil.which(n) is None]
+
+
 @app.get("/api/estado")
 async def estado():
     cfg = config.leer()
@@ -79,19 +88,14 @@ async def estado():
     skills = []
     for s in recetas.SKILLS:
         disponible = s["skill"] in instaladas
-        bloqueada = bool(s.get("solo_linux")) and config.es_windows()
-        skills.append(
-            {
-                **s,
-                "instalada": disponible,
-                "bloqueada": bloqueada,
-                "motivo": (
-                    "Esta skill graba la pantalla con herramientas de Linux (X11) y no funciona en Windows."
-                    if bloqueada
-                    else "" if disponible else f"La skill «{s['skill']}» no está instalada en esta computadora."
-                ),
-            }
-        )
+        faltan = _programas_faltantes(s.get("requiere"))
+        if not disponible:
+            motivo = f"La skill «{s['skill']}» no está instalada en esta computadora."
+        elif faltan:
+            motivo = f"Falta instalar {', '.join(faltan)}. {s['requiere']['como_instalar']}"
+        else:
+            motivo = ""
+        skills.append({**s, "instalada": disponible, "bloqueada": bool(faltan), "motivo": motivo})
     return {
         "tutor": (datos.get("tutor") or {}).get("nombre", ""),
         "chequeos": chequeos,

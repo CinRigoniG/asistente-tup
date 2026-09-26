@@ -10,8 +10,7 @@ roja con la nota o el texto, editable, y no pasa nada sin «Confirmar». Los arc
 se generan quedan listados con un botón «Abrir».
 
 Cubre las cuatro skills: `tup-campus-navigator`, `rubrica-builder`,
-`apunte-interactivo` y `tutorial-video-agente` (esta última se muestra deshabilitada en
-Windows: graba con herramientas de Linux).
+`apunte-interactivo` y `tutorial-video-agente`.
 
 ## Para usarlo
 
@@ -35,6 +34,9 @@ La pantalla «¿Está todo listo?» (arriba a la derecha) revisa todo y dice qu�
   (el `moodle-tutor` de `~/.claude.json`): si cambiás de campus ahí, el asistente lo sigue.
 - **Rúbricas, apuntes, videos**: la skill instalada en `~/.claude/skills/` o en la
   carpeta de trabajo (`.claude/skills/`).
+- **Videos**, además: `ffmpeg` (Windows: `winget install Gyan.FFmpeg`; en Linux también
+  `xdotool` y `wmctrl`). Si falta, la sección aparece deshabilitada con el comando para
+  instalarlo.
 
 ## Carpetas
 
@@ -78,3 +80,7 @@ freno en `can_use_tool`) y la piel, pero no toca ese repo. El panel arranca en u
 cubre sólo el campus. Este arranca en un menú guiado y cubre las cuatro skills.
 
 Log: `~/.asistente-tup/asistente.log`.
+
+## Licencia
+
+Apache-2.0, igual que las skills que usa. Ver `LICENSE`.

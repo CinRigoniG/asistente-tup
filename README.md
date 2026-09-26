@@ -87,7 +87,3 @@ freno en `can_use_tool`) y la piel, pero no toca ese repo. El panel arranca en u
 cubre sólo el campus. Este arranca en un menú guiado y cubre las cuatro skills.
 
 Log: `~/.asistente-tup/asistente.log`.
-
-## Licencia
-
-Apache-2.0, igual que las skills que usa. Ver `LICENSE`.

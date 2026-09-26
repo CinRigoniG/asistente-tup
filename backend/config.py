@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -37,8 +38,18 @@ PUERTO = 8790
 
 
 def _documentos() -> Path:
-    doc = HOME / "Documents"
-    return doc if doc.is_dir() else HOME
+    # En un Linux en castellano la carpeta es «Documentos»; xdg-user-dir la sabe siempre.
+    if shutil.which("xdg-user-dir"):
+        try:
+            ruta = subprocess.run(["xdg-user-dir", "DOCUMENTS"], capture_output=True, text=True, timeout=3).stdout.strip()
+            if ruta and Path(ruta).is_dir() and Path(ruta) != HOME:
+                return Path(ruta)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for nombre in ("Documents", "Documentos"):
+        if (HOME / nombre).is_dir():
+            return HOME / nombre
+    return HOME
 
 
 def leer() -> dict:

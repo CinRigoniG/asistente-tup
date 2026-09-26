@@ -14,12 +14,19 @@ Cubre las cuatro skills: `tup-campus-navigator`, `rubrica-builder`,
 
 ## Para usarlo
 
+**Paso a paso con capturas: [GUIA.md](GUIA.md)** (también está dentro del asistente,
+en el botón «Ayuda»).
+
 1. Tener **Claude Code** instalado y con la sesión iniciada (abrirlo una vez).
 2. Tener **Python 3.10+**.
-3. Doble clic en **`Instalar.bat`** (una sola vez).
-4. Doble clic en **`Abrir asistente.bat`**. Se abre el navegador en `http://127.0.0.1:8790`.
+3. Bajar este repo (botón verde **Code → Download ZIP**) y descomprimirlo.
+4. Abrirlo:
+   - **Windows:** doble clic en `Instalar.bat` (una sola vez) y después en `Abrir asistente.bat`.
+   - **Mac:** doble clic en `Abrir asistente.command` (la primera vez se instala solo).
+   - **Linux:** `./abrir.sh` (la primera vez se instala solo).
 
-Para cerrarlo: botón «Cerrar asistente» arriba a la derecha.
+Se abre el navegador en `http://127.0.0.1:8790`. Para cerrarlo: botón «Cerrar
+asistente», arriba a la derecha.
 
 No hace falta API key: usa la sesión de Claude Code de cada uno, igual que la terminal.
 Tampoco hace falta Node.

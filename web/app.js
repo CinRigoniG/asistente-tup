@@ -63,6 +63,7 @@ async function ruta() {
   if (tarea) cerrarTarea();
   if (vista === 'receta' && id) return verReceta(id);
   if (vista === 'estado') return verEstado();
+  if (vista === 'ayuda') return verAyuda();
   verInicio();
 }
 function confirmarSalida() {
@@ -216,7 +217,7 @@ function montarTarea(receta) {
   T.$texto = h('textarea', { placeholder: '¿Querés ajustar algo o seguir con otra cosa sobre esto? Escribilo acá…', 'aria-label': 'Seguir la tarea' });
   T.$enviar = h('button', { class: 'boton', type: 'submit' }, 'Enviar');
   const seguir = h('div', { class: 'seguir' },
-    h('form', { onsubmit: (e) => { e.preventDefault(); const t = T.$texto.value.trim(); if (t && !T.trabajando) { T.$texto.value = ''; correr({ texto: t }); } } }, T.$texto, T.$enviar),
+    T.$form = h('form', { hidden: true, onsubmit: (e) => { e.preventDefault(); const t = T.$texto.value.trim(); if (t && !T.trabajando) { T.$texto.value = ''; correr({ texto: t }); } } }, T.$texto, T.$enviar),
     h('div', { class: 'pie-tarea' },
       h('button', { class: 'boton secundario chico', type: 'button', onclick: () => { if (!T.trabajando || confirmarSalida()) { cerrarTarea(); location.hash = '#/'; } } }, 'Terminar y volver al inicio'),
       h('button', { class: 'boton secundario chico', type: 'button', onclick: () => { if (!T.trabajando || confirmarSalida()) { const r = T.receta; cerrarTarea(); location.hash = '#/receta/' + r.id; } } }, 'Hacer lo mismo con otros datos')));
@@ -234,6 +235,8 @@ async function correr(pedido) {
   const T = tarea;
   T.trabajando = true;
   T.$enviar.disabled = true;
+  // Mientras trabaja la caja de seguimiento no sirve y taparía las tarjetas de pregunta.
+  T.$form.hidden = true;
   // Cada turno arma su bloque: línea de pasos + respuesta.
   const turno = h('div', {});
   if (pedido.texto) turno.append(h('p', { class: 'meta', style: 'margin:32px 0 12px' }, 'Vos: ', pedido.texto));
@@ -338,7 +341,7 @@ async function correr(pedido) {
     if (e.name !== 'AbortError') turno.append(h('p', { class: 'error', role: 'alert' }, e.message));
   } finally {
     cerrarPaso();
-    if (tarea === T) { T.trabajando = false; T.$enviar.disabled = false; }
+    if (tarea === T) { T.trabajando = false; T.$enviar.disabled = false; T.$form.hidden = false; }
   }
 }
 
@@ -382,7 +385,7 @@ function tarjetaPregunta(ev) {
 
 const ETIQUETAS = {
   nota: 'Nota', grade: 'Nota', calificacion: 'Nota', feedback: 'Devolución', devolucion: 'Devolución', comentario: 'Comentario',
-  texto: 'Texto', mensaje: 'Mensaje', asunto: 'Asunto', alumno: 'Alumno', userid: 'Alumno (id)', assign_id: 'Tarea (id)',
+  texto: 'Texto', mensaje: 'Mensaje', asunto: 'Asunto', alumno: 'Alumno', tarea: 'Tarea', userid: 'Alumno (id)', assign_id: 'Tarea (id)',
 };
 function tarjetaConfirmar(ev) {
   const entrada = { ...ev.entrada };
@@ -391,7 +394,8 @@ function tarjetaConfirmar(ev) {
   for (const [k, v] of Object.entries(entrada)) {
     if (k === 'confirmado') continue;
     const id = 'conf-' + ev.id + '-' + k;
-    const etq = ETIQUETAS[k] || k.replaceAll('_', ' ');
+    const crudo = k.replaceAll('_', ' ');
+    const etq = ETIQUETAS[k] || crudo.charAt(0).toUpperCase() + crudo.slice(1);
     if (typeof v === 'string' || typeof v === 'number') {
       const largo = String(v).length > 60 || /feedback|devol|texto|mensaje|coment/i.test(k);
       const ctrl = largo ? h('textarea', { id }, String(v)) : h('input', { type: 'text', id, value: String(v) });
@@ -469,6 +473,25 @@ function verEstado() {
     h('div', { class: 'campo' }, h('label', { for: 'cfg-informes' }, 'Carpeta de informes'), h('span', { class: 'ayuda' }, 'Los PDF del campus se copian acá al terminar cada tarea.'), informes),
     h('div', {}, h('button', { class: 'boton', type: 'submit' }, 'Guardar')), msg),
   );
+}
+
+// ------------------------------------------------------------------ ayuda
+async function verAyuda() {
+  let texto;
+  try { texto = (await api('/api/guia')).texto; } catch (e) { montar(h('p', { class: 'error' }, 'No pude cargar la guía.')); return; }
+  const cuerpo = h('div', { class: 'respuesta guia', html: md(texto) });
+  const slug = (t) => t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 -]/g, '').trim().replace(/ +/g, '-');
+  cuerpo.querySelectorAll('h1, h2, h3').forEach((el) => { el.id = 'g-' + slug(el.textContent); });
+  cuerpo.querySelectorAll('a[href]').forEach((a) => {
+    const href = a.getAttribute('href');
+    if (href.startsWith('#')) {
+      // Los enlaces internos de la guía no pueden tocar el hash: es la navegación de la app.
+      a.addEventListener('click', (e) => { e.preventDefault(); document.getElementById('g-' + href.slice(1))?.scrollIntoView(); });
+    } else {
+      a.target = '_blank'; a.rel = 'noopener';
+    }
+  });
+  montar(h('button', { class: 'volver', type: 'button', onclick: () => { location.hash = '#/'; } }, '← Volver al inicio'), cuerpo);
 }
 
 // ------------------------------------------------------------------ barra

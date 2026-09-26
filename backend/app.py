@@ -366,16 +366,26 @@ async def apagar():
     return {"ok": True}
 
 
+@app.get("/api/guia")
+async def guia():
+    """La misma GUIA.md del repo: una sola fuente para GitHub y para la pantalla de Ayuda."""
+    return {"texto": (RAIZ / "GUIA.md").read_text(encoding="utf-8")}
+
+
+app.mount("/docs", StaticFiles(directory=RAIZ / "docs"), name="docs")
 app.mount("/fuentes", StaticFiles(directory=WEB / "fuentes"), name="fuentes")
 app.mount("/vendor", StaticFiles(directory=WEB / "vendor"), name="vendor")
 
 
 @app.get("/{ruta:path}")
 async def pantalla(ruta: str):
+    # no-cache: el navegador revalida siempre. Sin esto, después de actualizar el
+    # asistente seguiría mostrando la pantalla vieja hasta un Ctrl+F5 que nadie conoce.
+    sin_cache = {"Cache-Control": "no-cache"}
     archivo = (WEB / ruta).resolve()
     if ruta and archivo.is_file() and WEB.resolve() in archivo.parents:
-        return FileResponse(archivo)
-    return FileResponse(WEB / "index.html")
+        return FileResponse(archivo, headers=sin_cache)
+    return FileResponse(WEB / "index.html", headers=sin_cache)
 
 
 def _ya_corre(url: str) -> bool:

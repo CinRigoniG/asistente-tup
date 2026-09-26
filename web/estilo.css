@@ -66,6 +66,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { font-variant-numeric: tabular-nums; }
 body {
   margin: 0;
@@ -101,9 +102,10 @@ a { color: inherit; }
 .punto { width: 8px; height: 8px; border-radius: 50%; background: var(--tinta-tenue); }
 .punto.ok { background: var(--verificado); }
 .punto.mal { background: var(--atencion); }
-.boton-texto { font-size: 13px; font-weight: 500; background: none; border: 0; color: var(--tinta-media); padding: 6px 10px; border-radius: 10px; cursor: pointer; }
+.boton-texto { text-decoration: none; font-size: 13px; font-weight: 500; background: none; border: 0; color: var(--tinta-media); padding: 6px 10px; border-radius: 10px; cursor: pointer; }
 .boton-texto:hover { background: var(--papel-nota); color: var(--tinta); }
 
+main:focus-visible { outline: none; }
 main { max-width: 880px; margin: 0 auto; padding: 48px 24px 120px; outline: none; }
 
 /* --------------------------------------------------------------- inicio */
@@ -236,6 +238,17 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--tinta); out
 .seguir form { display: flex; gap: 8px; align-items: flex-end; }
 .seguir textarea { min-height: 48px; height: 48px; }
 .pie-tarea { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+/* ---------------------------------------------------------------- ayuda */
+.guia { max-width: 720px; }
+.guia h1 { font-size: 30px; margin-top: 0; }
+.guia h2 { font-size: 21px; margin-top: 44px; }
+.guia h1, .guia h2, .guia h3 { scroll-margin-top: 72px; }
+.guia img { display: block; width: 100%; border: 1px solid var(--borde); border-radius: 14px; box-shadow: var(--sombra-alta); margin: 16px 0 8px; }
+.guia hr { border: 0; border-top: 1px solid var(--borde); margin: 40px 0; }
+.guia blockquote { margin: 16px 0; padding: 10px 14px; background: var(--papel-nota); border-radius: 10px; }
+.guia blockquote p { margin: 0; }
+.guia li { margin: 4px 0; }
 
 /* --------------------------------------------------------------- estado */
 .chequeos { list-style: none; margin: 24px 0 40px; padding: 0; display: grid; gap: 0; max-width: var(--lectura); }

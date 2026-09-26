@@ -1,0 +1,5 @@
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.9
+# Lanza el Claude Code del propio tutor: no hace falta API key.
+claude-agent-sdk>=0.2.139,<0.3

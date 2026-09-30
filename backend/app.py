@@ -17,6 +17,9 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import unicodedata
+import uuid
 import urllib.request
 import webbrowser
 from datetime import datetime
@@ -27,7 +30,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agente, config, recetas
+from . import acciones, agente, config, recetas
 
 RAIZ = Path(__file__).resolve().parent.parent
 WEB = RAIZ / "web"
@@ -43,9 +46,10 @@ log = logging.getLogger("asistente")
 
 def _mis_datos() -> dict:
     try:
-        return json.loads(config.MIS_DATOS.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        datos = json.loads(config.mis_datos_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {}
+    return datos if isinstance(datos, dict) else {}
 
 
 def _programas_faltantes(requiere: dict | None) -> list[str]:
@@ -63,6 +67,7 @@ async def estado():
     instaladas = config.skills_instaladas(cfg["carpeta_trabajo"])
     datos = _mis_datos()
     campus = config.mcp_campus()
+    activo = config.campus_activo()
     chequeos = [
         {
             "id": "claude",
@@ -74,7 +79,7 @@ async def estado():
             "id": "campus",
             "ok": bool(campus),
             "titulo": "Conexión con el campus configurada",
-            "detalle": (campus or {}).get("env", {}).get("MOODLE_URL", ""),
+            "detalle": f"{activo['nombre']} — {activo.get('url', '')}",
             "si_falla": "Instalá la skill tup-campus-navigator y seguí su instalación (install.sh).",
         },
         {
@@ -87,7 +92,7 @@ async def estado():
     ]
     skills = []
     for s in recetas.SKILLS:
-        disponible = s["skill"] in instaladas
+        disponible = s["skill"] is None or s["skill"] in instaladas
         faltan = _programas_faltantes(s.get("requiere"))
         if not disponible:
             motivo = f"La skill «{s['skill']}» no está instalada en esta computadora."
@@ -103,6 +108,259 @@ async def estado():
         "carpeta_trabajo": str(cfg["carpeta_trabajo"]),
         "carpeta_informes": str(cfg["carpeta_informes"]),
     }
+
+
+@app.get("/api/campus")
+async def campus():
+    return {"campus": config.listar_campus(), "activo": config.tenant_activo()}
+
+
+class CampusActivo(BaseModel):
+    id: str
+
+
+@app.post("/api/campus/activo")
+async def campus_activo(p: CampusActivo):
+    """Cambia el campus activo. Lo lee la skill en cada llamada, así que rige para la próxima tarea."""
+    if _hay_tarea_ocupada():
+        raise HTTPException(409, "Hay una tarea trabajando. Esperá a que termine para cambiar de campus.")
+    try:
+        config.set_tenant_activo(p.id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"campus": config.listar_campus(), "activo": config.tenant_activo()}
+
+
+class CampusNuevo(BaseModel):
+    nombre: str
+    url: str
+    moodle_user: str
+    moodle_pass: str
+    activeia_user: str = ""
+    activeia_pass: str = ""
+
+
+class Eleccion(BaseModel):
+    course_id: int
+    group_ids: list[int] = []
+
+
+class CampusConfirmar(BaseModel):
+    token: str
+    seleccion: list[Eleccion]
+
+
+class Asignacion(BaseModel):
+    seleccion: list[Eleccion]
+
+
+def _hay_tarea_ocupada() -> bool:
+    return any(getattr(s, "ocupada", False) for s in agente.SESIONES.values())
+
+
+def _slug(nombre: str) -> str:
+    plano = unicodedata.normalize("NFD", nombre.lower()).encode("ascii", "ignore").decode()
+    base = re.sub(r"[^a-z0-9]+", "-", plano).strip("-")[:34].strip("-") or "campus"
+    usados = {c["id"].lower() for c in config.listar_campus()}
+    candidato, n = base, 2
+    while candidato in usados:
+        candidato = f"{base}-{n}"
+        n += 1
+    return candidato
+
+
+async def _descubrir(url: str, usuario: str, clave: str) -> dict:
+    """
+    Prueba el login y trae del campus todas las materias, sus comisiones candidatas (marcando
+    las del tutor) y sus tareas. Corre en un subproceso con el Python de la skill del campus;
+    no guarda nada. Levanta HTTPException si algo sale mal.
+    """
+    mcp = config.mcp_campus()
+    if not mcp or not mcp.get("command") or not mcp.get("args"):
+        raise HTTPException(400, "No encuentro la skill del campus instalada; no puedo probar la conexión.")
+    entrada = json.dumps({"url": url, "moodle_user": usuario, "moodle_pass": clave})
+    # Entorno sin MOODLE_*/ACTIVEIA_*: la prueba no debe heredar ningún campus ni credencial ajena.
+    entorno = {k: v for k, v in os.environ.items() if not k.startswith(("MOODLE_", "ACTIVEIA_"))}
+    entorno.update({k: v for k, v in (mcp.get("env") or {}).items() if not k.startswith(("MOODLE_", "ACTIVEIA_"))})
+    entorno["PYTHONIOENCODING"] = "utf-8"
+    entorno["PYTHONUTF8"] = "1"
+    runner = Path(__file__).with_name("alta_campus.py")
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run, [mcp["command"], str(runner), str(mcp["args"][0])],
+            input=entrada, capture_output=True, text=True, timeout=240, env=entorno, encoding="utf-8", errors="replace",
+            # En Windows el servidor corre sin consola (pythonw): sin esto, el subproceso abre una
+            # ventana negra de consola cada vez que se prueba o se lee un campus.
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if config.es_windows() else {}),
+        )
+        res = json.loads(proc.stdout.strip().splitlines()[-1])
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "El campus tardó demasiado en responder. Probá de nuevo en un rato.")
+    except (OSError, ValueError, IndexError):
+        log.exception("descubrimiento de campus: el subproceso no devolvió un resultado")
+        raise HTTPException(500, "No pude probar la conexión con el campus.")
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "No pude conectarme con esos datos.")
+    return res
+
+
+def _vista(catalogo: dict, elegidas: dict[int, list[int]] | None) -> list[dict]:
+    """Materias y comisiones para la pantalla. `elegida`: la comisión ya está elegida (o, sin
+    elección previa, es del tutor según el campus)."""
+    return [
+        {
+            "course_id": c["course_id"],
+            "nombre": c["nombre"],
+            "comisiones": [
+                {"group_id": g["group_id"], "comision": g["comision"],
+                 "elegida": (g["group_id"] in elegidas.get(c["course_id"], [])) if elegidas is not None else bool(g.get("mia"))}
+                for g in c["comisiones"]
+            ],
+        }
+        for c in catalogo["cursos"]
+    ]
+
+
+def _a_seleccion(elecciones: list[Eleccion]) -> dict[int, list[int]]:
+    return {e.course_id: list(dict.fromkeys(e.group_ids)) for e in elecciones}
+
+
+# Campus probados que esperan que la persona elija sus comisiones (sólo en memoria: llevan
+# las credenciales recién tipeadas, que no se guardan hasta confirmar).
+_PENDIENTES: dict[str, dict] = {}
+_VIDA_PENDIENTE_S = 30 * 60
+
+
+def _limpiar_pendientes() -> None:
+    ahora = time.time()
+    for t in [t for t, v in _PENDIENTES.items() if ahora - v["hora"] > _VIDA_PENDIENTE_S]:
+        _PENDIENTES.pop(t, None)
+
+
+@app.post("/api/campus/probar")
+async def campus_probar(p: CampusNuevo):
+    """Paso 1 de agregar un campus: prueba el login y devuelve materias y comisiones para elegir. No guarda nada."""
+    url = p.url.strip().rstrip("/")
+    if not re.match(r"^https?://[^\s/]+", url):
+        raise HTTPException(400, "La dirección del campus tiene que empezar con https:// (por ejemplo https://campus.miuniversidad.edu.ar).")
+    if not p.nombre.strip() or not p.moodle_user.strip() or not p.moodle_pass:
+        raise HTTPException(400, "Falta el nombre, el usuario o la contraseña del campus.")
+    if bool(p.activeia_user.strip()) != bool(p.activeia_pass):
+        raise HTTPException(400, "Para Active-IA hacen falta el usuario y la contraseña, o ninguno de los dos.")
+    if _hay_tarea_ocupada():
+        raise HTTPException(409, "Hay una tarea trabajando. Esperá a que termine para agregar un campus.")
+    res = await _descubrir(url, p.moodle_user.strip(), p.moodle_pass)
+    _limpiar_pendientes()
+    token = uuid.uuid4().hex
+    _PENDIENTES[token] = {"hora": time.time(), "nombre": p.nombre.strip(), "url": url, "usuario": p.moodle_user.strip(),
+                          "clave": p.moodle_pass, "ia_usuario": p.activeia_user.strip(), "ia_clave": p.activeia_pass,
+                          "catalogo": {"tutor": res.get("tutor", ""), "cursos": res["cursos"]}}
+    return {"token": token, "cursos": _vista(_PENDIENTES[token]["catalogo"], None),
+            "detectadas": bool(res.get("detectadas")), "nota": res.get("nota")}
+
+
+@app.post("/api/campus")
+async def campus_alta(p: CampusConfirmar):
+    """Paso 2: con las comisiones elegidas, guarda el campus (credenciales, catálogo y «Mis datos») y lo deja activo."""
+    _limpiar_pendientes()
+    pend = _PENDIENTES.get(p.token)
+    if not pend:
+        raise HTTPException(410, "Pasó mucho tiempo desde que probaste la conexión. Volvé a probarla.")
+    try:
+        mis_datos = config.construir_mis_datos(pend["catalogo"], _a_seleccion(p.seleccion))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    tenant_id = _slug(pend["nombre"])
+    try:
+        config.registrar_campus(tenant_id, pend["nombre"], pend["url"])
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    config.escribir_env(tenant_id, {
+        "MOODLE_USER": pend["usuario"], "MOODLE_PASS": pend["clave"], "MOODLE_URL": pend["url"],
+        "ACTIVEIA_USER": pend["ia_usuario"], "ACTIVEIA_PASS": pend["ia_clave"],
+    })
+    config.guardar_catalogo(tenant_id, pend["catalogo"])
+    config.guardar_mis_datos(tenant_id, mis_datos)
+    config.set_tenant_activo(tenant_id)
+    _PENDIENTES.pop(p.token, None)
+    return {"campus": config.listar_campus(), "activo": config.tenant_activo(),
+            "detalle": {"cursos": len(mis_datos["cursos"])}}
+
+
+def _campus_o_404(cid: str) -> dict:
+    campus = next((c for c in config.listar_campus() if c["id"] == cid), None)
+    if not campus:
+        raise HTTPException(404, "Ese campus no está dado de alta.")
+    return campus
+
+
+@app.post("/api/campus/{cid}/asignacion/leer")
+async def asignacion_leer(cid: str):
+    """Vuelve a leer del campus (con las credenciales ya guardadas) sus materias y comisiones,
+    marcando las que hoy están elegidas."""
+    campus = _campus_o_404(cid)
+    if _hay_tarea_ocupada():
+        raise HTTPException(409, "Hay una tarea trabajando. Esperá a que termine para cambiar tus comisiones.")
+    cred = config.leer_credenciales(cid)
+    if not cred.get("MOODLE_USER") or not cred.get("MOODLE_PASS"):
+        raise HTTPException(400, "Este campus todavía no tiene usuario y contraseña guardados. "
+                                 "Usá «Otra consulta sobre el campus» y pedile a Claude que configure tu acceso.")
+    res = await _descubrir(campus["url"], cred["MOODLE_USER"], cred["MOODLE_PASS"])
+    catalogo = {"tutor": res.get("tutor", ""), "cursos": res["cursos"]}
+    config.guardar_catalogo(cid, catalogo)
+    actuales = config.seleccion_actual(cid)
+    return {"cursos": _vista(catalogo, actuales if actuales is not None else None),
+            "detectadas": bool(res.get("detectadas")), "nota": res.get("nota"),
+            "tiene_seleccion": actuales is not None}
+
+
+@app.put("/api/campus/{cid}/asignacion")
+async def asignacion_guardar(cid: str, p: Asignacion):
+    """Guarda qué materias y comisiones son del tutor en ese campus (lo que leen las skills)."""
+    _campus_o_404(cid)
+    if _hay_tarea_ocupada():
+        raise HTTPException(409, "Hay una tarea trabajando. Esperá a que termine para cambiar tus comisiones.")
+    catalogo = config.leer_catalogo(cid)
+    if catalogo is None:
+        raise HTTPException(409, "Primero hay que leer las comisiones del campus.")
+    base = _leer_mis_datos_de(cid)
+    try:
+        datos = config.construir_mis_datos(catalogo, _a_seleccion(p.seleccion), base)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    config.guardar_mis_datos(cid, datos)
+    return {"ok": True, "cursos": len(datos["cursos"])}
+
+
+def _leer_mis_datos_de(cid: str) -> dict:
+    try:
+        d = json.loads((config.datos_dir(cid) / "mis_datos.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+class AccionEdicion(BaseModel):
+    titulo: str
+    bajada: str
+
+
+@app.put("/api/acciones/{aid}")
+async def accion_renombrar(aid: str, p: AccionEdicion):
+    """Cambia el nombre y la descripción de una acción propia."""
+    try:
+        return acciones.renombrar(aid, p.titulo, p.bajada)
+    except KeyError:
+        raise HTTPException(404, "Esa acción no existe.")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/acciones/{aid}")
+async def accion_eliminar(aid: str):
+    if not acciones.eliminar(aid):
+        raise HTTPException(404, "Esa acción no existe.")
+    return {"ok": True}
 
 
 @app.get("/api/catalogo")
@@ -121,7 +379,7 @@ async def catalogo():
         for c in datos.get("cursos", [])
         if "course_id" in c
     ]
-    return {"recetas": recetas.RECETAS, "cursos": cursos}
+    return {"recetas": [*recetas.RECETAS, *acciones.listar()], "cursos": cursos}
 
 
 class Carpetas(BaseModel):
@@ -204,7 +462,7 @@ def _nuevos(antes: dict[str, float], despues: dict[str, float]) -> list[str]:
 
 def _copiar_informes(nuevos: list[str], informes: Path) -> list[str]:
     """Los PDF que la skill del campus deja en ~/.moodle-skill/salidas se copian a la carpeta de informes."""
-    salidas = config.SALIDAS_CAMPUS.resolve()
+    salidas = config.salidas_campus().resolve()
     copiados = []
     for p in nuevos:
         ruta = Path(p)
@@ -223,7 +481,7 @@ class Abrir(BaseModel):
 
 def _permitida(ruta: Path) -> bool:
     cfg = config.leer()
-    bases = [cfg["carpeta_trabajo"], cfg["carpeta_informes"], config.SALIDAS_CAMPUS]
+    bases = [cfg["carpeta_trabajo"], cfg["carpeta_informes"], config.salidas_campus()]
     try:
         r = ruta.resolve()
     except OSError:
@@ -277,21 +535,22 @@ async def tarea(p: Pedido):
         sesion = None
 
     if p.receta:
-        receta = recetas.por_id(p.receta)
+        receta = recetas.por_id(p.receta) or acciones.por_id(p.receta)
         if receta is None:
             raise HTTPException(404, "Esa acción no existe.")
         falta = recetas.faltantes(receta, p.valores)
         if falta:
             raise HTTPException(400, "Falta completar: " + ", ".join(falta))
         skill = next(s["skill"] for s in recetas.SKILLS if s["id"] == receta["skill"])
-        prompt = f"Usá la skill {skill}.\n\n" + recetas.armar_pedido(receta, p.valores)
+        # Las acciones propias ya nombran la skill que corresponde dentro de su instrucción.
+        prompt = (f"Usá la skill {skill}.\n\n" if skill else "") + recetas.armar_pedido(receta, p.valores)
     elif p.texto and p.texto.strip():
         prompt = p.texto.strip()
     else:
         raise HTTPException(400, "No hay nada para hacer.")
 
     cfg = config.leer()
-    bases = [cfg["carpeta_trabajo"], config.SALIDAS_CAMPUS]
+    bases = [cfg["carpeta_trabajo"], config.salidas_campus()]
 
     async def stream():
         nonlocal sesion
@@ -325,7 +584,7 @@ async def tarea(p: Pedido):
 def _es_de_salidas(ruta: str, copiados: list[str]) -> bool:
     """Un PDF de salidas que ya se copió a Informes se muestra una sola vez: la copia."""
     nombres = {Path(c).name for c in copiados}
-    return Path(ruta).name in nombres and config.SALIDAS_CAMPUS.resolve() in Path(ruta).resolve().parents
+    return Path(ruta).name in nombres and config.salidas_campus().resolve() in Path(ruta).resolve().parents
 
 
 @app.post("/api/tarea/{sid}/responder")
@@ -396,8 +655,27 @@ def _ya_corre(url: str) -> bool:
         return False
 
 
+def _consola_oculta() -> None:
+    """
+    En Windows el asistente corre con pythonw (sin consola). Cada proceso de consola que lanza —el CLI de
+    Claude, la skill del campus— abriría entonces su propia ventana negra, que además roba el foco.
+    Con una consola oculta propia, todos los hijos la heredan y no aparece ninguna ventana.
+    """
+    if not config.es_windows():
+        return
+    import ctypes
+
+    k32, u32 = ctypes.windll.kernel32, ctypes.windll.user32
+    if not k32.GetConsoleWindow() and k32.AllocConsole():
+        hwnd = k32.GetConsoleWindow()
+        if hwnd:
+            u32.ShowWindow(hwnd, 0)  # SW_HIDE
+
+
 def main() -> None:
     import uvicorn
+
+    _consola_oculta()
 
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(

@@ -43,12 +43,31 @@ function montar(...nodos) {
 
 // ------------------------------------------------------------------ arranque
 async function cargar() {
-  const [estado, catalogo] = await Promise.all([api('/api/estado'), api('/api/catalogo')]);
-  E.estado = estado;
-  E.catalogo = catalogo;
-  const mal = estado.chequeos.filter((c) => !c.ok);
+  // /api/campus es no-esencial: si falla (o el archivo del campus está corrompido)
+  // el resto de la pantalla (catálogo, estado) no tiene por qué quedar inutilizable.
+  const [estadoR, catalogoR, campusR] = await Promise.allSettled([api('/api/estado'), api('/api/catalogo'), api('/api/campus')]);
+  if (estadoR.status === 'rejected') throw estadoR.reason;
+  if (catalogoR.status === 'rejected') throw catalogoR.reason;
+  E.estado = estadoR.value;
+  E.catalogo = catalogoR.value;
+  E.campus = campusR.status === 'fulfilled' ? campusR.value : { campus: [], activo: null };
+  pintarCampus();
+  const mal = E.estado.chequeos.filter((c) => !c.ok);
   document.getElementById('estado-punto').className = 'punto ' + (mal.length ? 'mal' : 'ok');
   document.getElementById('estado-texto').textContent = mal.length ? `Falta configurar ${mal.length === 1 ? 'algo' : mal.length + ' cosas'}` : 'Todo listo';
+}
+
+function pintarCampus() {
+  const chip = document.getElementById('campus-chip');
+  const lista = E.campus?.campus || [];
+  const activo = lista.find((k) => String(k.id) === String(E.campus?.activo));
+  chip.hidden = false;
+  document.getElementById('campus-nombre').textContent = activo ? activo.nombre : (lista.length ? 'Elegir…' : 'Agregar');
+}
+
+async function recargar() {
+  E.estado = null;
+  await cargar();
 }
 
 async function ruta() {
@@ -64,6 +83,7 @@ async function ruta() {
   if (vista === 'receta' && id) return verReceta(id);
   if (vista === 'estado') return verEstado();
   if (vista === 'ayuda') return verAyuda();
+  if (vista === 'campus') return verCampus();
   verInicio();
 }
 function confirmarSalida() {
@@ -71,6 +91,47 @@ function confirmarSalida() {
 }
 
 // ------------------------------------------------------------------ inicio
+// Una acción de la lista. Las propias llevan la etiqueta «Mía» y permiten renombrar o eliminar.
+function itemAccion(r, deshabilitada) {
+  const boton = h('button', {
+    class: 'accion', type: 'button', disabled: deshabilitada,
+    onclick: () => { location.hash = '#/receta/' + r.id; },
+  },
+  h('span', { class: 'accion-texto' },
+    h('span', { class: 'accion-titulo' }, r.titulo, r.propia ? h('span', { class: 'etiqueta-mia' }, 'Mía') : null),
+    h('span', { class: 'accion-bajada' }, r.bajada)),
+  h('span', { class: 'flecha', 'aria-hidden': 'true' }, '→'));
+  if (!r.propia) return h('li', {}, boton);
+
+  const li = h('li', { class: 'accion-propia' });
+  const normal = () => {
+    const editar = h('button', { type: 'button', class: 'boton-texto', onclick: formulario }, 'Renombrar');
+    const borrar = h('button', { type: 'button', class: 'boton-texto', onclick: eliminar }, 'Eliminar');
+    li.replaceChildren(boton, h('div', { class: 'accion-manejo' }, editar, borrar));
+  };
+  const refrescar = async () => { E.catalogo = await api('/api/catalogo'); verInicio(); };
+  const eliminar = async () => {
+    if (!window.confirm(`¿Eliminar la acción «${r.titulo}»? No se puede deshacer.`)) return;
+    try { await api('/api/acciones/' + encodeURIComponent(r.id), { method: 'DELETE' }); await refrescar(); }
+    catch (e) { alertaSuave(e.message); }
+  };
+  const formulario = () => {
+    const t = h('input', { type: 'text', id: 'rn-t-' + r.id, value: r.titulo, maxlength: 70, 'aria-label': 'Nombre de la acción' });
+    const b = h('input', { type: 'text', id: 'rn-b-' + r.id, value: r.bajada, maxlength: 220, 'aria-label': 'Descripción de la acción' });
+    const err = h('p', { class: 'error-form', role: 'alert' });
+    const ok = h('button', { type: 'submit', class: 'boton chico' }, 'Guardar');
+    const no = h('button', { type: 'button', class: 'boton secundario chico', onclick: normal }, 'Cancelar');
+    li.replaceChildren(h('form', { class: 'renombrar', onsubmit: async (ev) => {
+      ev.preventDefault(); err.textContent = ''; ok.disabled = true;
+      try { await api('/api/acciones/' + encodeURIComponent(r.id), { method: 'PUT', body: { titulo: t.value, bajada: b.value } }); await refrescar(); }
+      catch (e) { err.textContent = e.message; ok.disabled = false; }
+    } }, t, b, err, h('div', { class: 'botones' }, ok, no)));
+    t.focus();
+  };
+  normal();
+  return li;
+}
+
 function verInicio() {
   const nombre = (E.estado.tutor || '').split(' ')[0];
   const secciones = E.estado.skills.map((s) => {
@@ -82,21 +143,17 @@ function verInicio() {
         h('p', {}, s.bajada)),
       h('div', {},
         deshabilitada ? h('p', { class: 'aviso' }, s.motivo) : null,
-        h('ul', { class: 'acciones' }, recs.map((r) =>
-          h('li', {}, h('button', {
-            class: 'accion', type: 'button', disabled: deshabilitada,
-            onclick: () => { location.hash = '#/receta/' + r.id; },
-          },
-          h('span', { class: 'accion-texto' },
-            h('span', { class: 'accion-titulo' }, r.titulo),
-            h('span', { class: 'accion-bajada' }, r.bajada)),
-          h('span', { class: 'flecha', 'aria-hidden': 'true' }, '→')))))));
+        h('ul', { class: 'acciones' }, recs.map((r) => itemAccion(r, deshabilitada)))));
   });
   const mal = E.estado.chequeos.filter((c) => !c.ok);
   montar(
     h('div', { class: 'saludo' },
       h('h1', {}, nombre ? `Hola, ${nombre}.` : 'Hola.'),
-      h('p', {}, 'Elegí qué querés hacer. Te voy a pedir sólo lo necesario y te muestro cada paso.')),
+      h('p', {}, 'Elegí qué querés hacer. Te voy a pedir sólo lo necesario y te muestro cada paso.'),
+      (() => {
+        const activo = (E.campus?.campus || []).find((k) => String(k.id) === String(E.campus.activo));
+        return h('p', { class: 'meta', style: 'margin-top:10px' }, 'Trabajando en el campus: ', h('strong', {}, activo ? activo.nombre : 'sin elegir'), ' · ', h('a', { href: '#/campus' }, 'Cambiar o agregar otro'));
+      })()),
     mal.length ? h('p', { class: 'aviso' }, 'Hay cosas por configurar antes de usar todo. ', h('a', { href: '#/estado' }, 'Ver qué falta')) : null,
     ...secciones,
   );
@@ -220,7 +277,12 @@ function montarTarea(receta) {
     T.$form = h('form', { hidden: true, onsubmit: (e) => { e.preventDefault(); const t = T.$texto.value.trim(); if (t && !T.trabajando) { T.$texto.value = ''; correr({ texto: t }); } } }, T.$texto, T.$enviar),
     h('div', { class: 'pie-tarea' },
       h('button', { class: 'boton secundario chico', type: 'button', onclick: () => { if (!T.trabajando || confirmarSalida()) { cerrarTarea(); location.hash = '#/'; } } }, 'Terminar y volver al inicio'),
-      h('button', { class: 'boton secundario chico', type: 'button', onclick: () => { if (!T.trabajando || confirmarSalida()) { const r = T.receta; cerrarTarea(); location.hash = '#/receta/' + r.id; } } }, 'Hacer lo mismo con otros datos')));
+      h('button', { class: 'boton secundario chico', type: 'button', onclick: () => { if (!T.trabajando || confirmarSalida()) { const r = T.receta; cerrarTarea(); location.hash = '#/receta/' + r.id; } } }, 'Hacer lo mismo con otros datos'),
+      // Convertir lo que se hizo en un botón propio. No tiene sentido sobre la creación misma ni sobre una acción que ya es propia.
+      receta.id === 'crear_accion' || receta.propia ? null : h('button', { class: 'boton secundario chico', type: 'button', onclick: () => {
+        if (T.trabajando) return;
+        correr({ texto: 'Quiero guardar lo que hicimos como una acción propia, para repetirla con un botón. Preguntame lo que haga falta (nombre, descripción y qué datos cambian cada vez: materia, comisión, un texto, un archivo…), armá la instrucción a partir de lo que hicimos en esta conversación y guardala con guardar_accion. Yo la confirmo antes de que se guarde.' });
+      } }, 'Guardar como acción')));
   T.$texto.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); T.$texto.form.requestSubmit(); } });
   montar(h('p', { class: 'ruta' }, 'Tarea'), h('h1', {}, receta.titulo), T.$pedido, T.$cuerpo, seguir);
 }
@@ -333,6 +395,8 @@ async function correr(pedido) {
           case 'fin':
             cerrarPaso();
             if (pintar) { cancelAnimationFrame(pintar); render(); }
+            // Claude pudo guardar una acción propia: se refresca el catálogo para que aparezca en el inicio.
+            api('/api/catalogo').then((c) => { E.catalogo = c; }).catch(() => {});
             break;
         }
       }
@@ -387,7 +451,45 @@ const ETIQUETAS = {
   nota: 'Nota', grade: 'Nota', calificacion: 'Nota', feedback: 'Devolución', devolucion: 'Devolución', comentario: 'Comentario',
   texto: 'Texto', mensaje: 'Mensaje', asunto: 'Asunto', alumno: 'Alumno', tarea: 'Tarea', userid: 'Alumno (id)', assign_id: 'Tarea (id)',
 };
+const TIPOS_CAMPO = { curso: 'Materia', comision: 'Comisión', tarea: 'Tarea', texto: 'Texto corto', parrafo: 'Texto largo', archivo: 'Un archivo', archivos: 'Varios archivos', opcion: 'Lista de opciones' };
+
+// Lo que Claude propone guardar como acción propia: se ve entero y se puede ajustar antes de confirmar.
+function tarjetaGuardarAccion(ev) {
+  const e = ev.entrada || {};
+  const titulo = h('input', { type: 'text', id: 'ga-titulo', value: e.titulo || '', maxlength: 70 });
+  const bajada = h('input', { type: 'text', id: 'ga-bajada', value: e.bajada || '', maxlength: 220 });
+  const pedido = h('textarea', { id: 'ga-pedido', rows: 6 }, e.pedido || '');
+  const campos = Array.isArray(e.campos) ? e.campos : [];
+  const resumen = campos.length
+    ? h('ul', { class: 'campos-resumen' }, campos.map((c) => h('li', {}, h('strong', {}, c.etiqueta), ' · ', TIPOS_CAMPO[c.tipo] || c.tipo,
+      c.opcional ? ' (opcional)' : '', c.tipo === 'opcion' && c.opciones ? ': ' + c.opciones.join(', ') : '')))
+    : h('p', { class: 'meta', style: 'margin:0' }, 'No pide ningún dato: al usarla arranca directo.');
+  const aviso = h('p', { class: 'error-form', role: 'alert' });
+  const si = h('button', { class: 'boton', type: 'button' }, 'Guardar acción');
+  const no = h('button', { class: 'boton secundario', type: 'button' }, 'No, cancelar');
+  const tarjeta = h('div', { class: 'tarjeta confirmar suave', role: 'group', 'aria-label': 'Guardar acción propia' },
+    h('h3', {}, 'Guardar como acción propia'),
+    h('p', { style: 'margin:0' }, 'Va a aparecer en «Mis acciones», como un botón más. Revisala y ajustá lo que quieras.'),
+    h('div', { class: 'campo' }, h('label', { for: 'ga-titulo' }, 'Nombre'), titulo),
+    h('div', { class: 'campo' }, h('label', { for: 'ga-bajada' }, 'Descripción'), bajada),
+    h('div', { class: 'campo' }, h('span', { class: 'meta' }, 'Lo que te va a pedir cada vez'), resumen),
+    h('div', { class: 'campo' }, h('label', { for: 'ga-pedido' }, 'Instrucción para Claude'), pedido),
+    aviso, h('div', { class: 'botones' }, si, no));
+  const cerrar = (t) => { tarjeta.querySelectorAll('button, input, textarea').forEach((x) => { x.disabled = true; }); tarjeta.querySelector('.botones').replaceWith(h('p', { class: 'hecho-confirmar' }, t)); };
+  si.onclick = async () => {
+    try { await api(`/api/tarea/${tarea.sid}/responder`, { method: 'POST', body: { id: ev.id, ok: true, entrada: { ...e, titulo: titulo.value, bajada: bajada.value, pedido: pedido.value } } }); cerrar('Confirmado.'); }
+    catch (x) { aviso.textContent = x.message; }
+  };
+  no.onclick = async () => {
+    try { await api(`/api/tarea/${tarea.sid}/responder`, { method: 'POST', body: { id: ev.id, ok: false, motivo: 'La persona canceló el guardado.' } }); cerrar('Cancelado. No se guardó nada.'); }
+    catch (x) { aviso.textContent = x.message; }
+  };
+  setTimeout(() => tarjeta.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+  return tarjeta;
+}
+
 function tarjetaConfirmar(ev) {
+  if (ev.tool === 'guardar_accion') return tarjetaGuardarAccion(ev);
   const entrada = { ...ev.entrada };
   const editables = h('div', {});
   const leer = {};
@@ -472,6 +574,174 @@ function verEstado() {
     h('div', { class: 'campo' }, h('label', { for: 'cfg-trabajo' }, 'Carpeta de trabajo'), h('span', { class: 'ayuda' }, 'Acá quedan los archivos que subís y lo que Claude produce (rúbricas, apuntes…).'), trabajo),
     h('div', { class: 'campo' }, h('label', { for: 'cfg-informes' }, 'Carpeta de informes'), h('span', { class: 'ayuda' }, 'Los PDF del campus se copian acá al terminar cada tarea.'), informes),
     h('div', {}, h('button', { class: 'boton', type: 'submit' }, 'Guardar')), msg),
+  );
+}
+
+// ------------------------------------------------------------------ campus
+// Materias y comisiones con casillas: se usa al agregar un campus y al editar uno existente.
+// Devuelve { nodo, seleccion() } con la selección como [{ course_id, group_ids }].
+function selectorComisiones(cursos) {
+  const cajas = [];
+  const bloques = cursos.map((c) => {
+    const propias = [];
+    const lista = h('div', { class: 'comisiones-grid' });
+    c.comisiones.forEach((g) => {
+      const input = h('input', { type: 'checkbox', id: `g-${c.course_id}-${g.group_id}` });
+      input.checked = !!g.elegida;
+      cajas.push({ course_id: c.course_id, group_id: g.group_id, input });
+      propias.push(input);
+      lista.append(h('label', { class: 'casilla', for: input.id }, input, h('span', {}, g.comision)));
+    });
+    const marcar = (v) => () => propias.forEach((i) => { i.checked = v; });
+    return h('fieldset', { class: 'materia' },
+      h('legend', {}, c.nombre),
+      c.comisiones.length
+        ? h('div', {},
+          h('div', { class: 'materia-acciones' },
+            h('button', { type: 'button', class: 'boton-texto', onclick: marcar(true) }, 'Marcar todas'),
+            h('button', { type: 'button', class: 'boton-texto', onclick: marcar(false) }, 'Ninguna')),
+          lista)
+        : h('p', { class: 'meta', style: 'margin:0' }, 'No encontré comisiones en esta materia.'));
+  });
+  return {
+    nodo: h('div', { class: 'materias' }, bloques),
+    seleccion: () => cursos.map((c) => ({
+      course_id: c.course_id,
+      group_ids: cajas.filter((x) => x.course_id === c.course_id && x.input.checked).map((x) => x.group_id),
+    })),
+  };
+}
+
+function verCampus() {
+  const lista = E.campus?.campus || [];
+  const msg = h('p', { class: 'error-form', role: 'alert', 'aria-live': 'polite' });
+
+  const cambiar = async (k, boton) => {
+    msg.textContent = '';
+    boton.disabled = true;
+    try {
+      E.campus = await api('/api/campus/activo', { method: 'POST', body: { id: k.id } });
+      await recargar();
+      verCampus();
+    } catch (e) { msg.textContent = e.message; boton.disabled = false; }
+  };
+
+  // «Mis materias y comisiones» de un campus ya dado de alta: se lee del campus y se elige.
+  const editarComisiones = async (k, boton, panel) => {
+    if (panel.childNodes.length) { panel.replaceChildren(); return; }
+    msg.textContent = '';
+    boton.disabled = true; const etiqueta = boton.textContent; boton.textContent = 'Leyendo el campus…';
+    try {
+      const r = await api(`/api/campus/${encodeURIComponent(k.id)}/asignacion/leer`, { method: 'POST' });
+      const sel = selectorComisiones(r.cursos);
+      const aviso = h('p', { class: 'error-form', role: 'alert' });
+      const guardar = h('button', { type: 'button', class: 'boton chico' }, 'Guardar');
+      const cancelar = h('button', { type: 'button', class: 'boton secundario chico', onclick: () => panel.replaceChildren() }, 'Cancelar');
+      guardar.addEventListener('click', async () => {
+        aviso.textContent = '';
+        const s = sel.seleccion();
+        if (!s.some((x) => x.group_ids.length)) { aviso.textContent = 'Elegí al menos una comisión.'; return; }
+        guardar.disabled = true;
+        try {
+          await api(`/api/campus/${encodeURIComponent(k.id)}/asignacion`, { method: 'PUT', body: { seleccion: s } });
+          await recargar();
+          panel.replaceChildren(h('p', { class: 'meta', role: 'status' }, 'Listo: guardé tus materias y comisiones de este campus.'));
+        } catch (e) { aviso.textContent = e.message; guardar.disabled = false; }
+      });
+      panel.replaceChildren(
+        r.nota ? h('p', { class: 'aviso' }, r.nota) : null,
+        h('p', { class: 'meta', style: 'margin:0 0 8px' }, 'Marcá las comisiones que tenés a cargo. Las acciones sólo van a mostrar estas.'),
+        sel.nodo, aviso, h('div', { class: 'botones' }, guardar, cancelar));
+    } catch (e) { msg.textContent = e.message; }
+    boton.disabled = false; boton.textContent = etiqueta;
+  };
+
+  const items = lista.map((k) => {
+    const activo = String(k.id) === String(E.campus.activo);
+    const usar = h('button', { type: 'button', class: 'boton secundario chico' }, 'Usar este');
+    usar.addEventListener('click', () => cambiar(k, usar));
+    const panel = h('div', { class: 'campus-panel' });
+    const comisiones = h('button', { type: 'button', class: 'boton secundario chico' }, 'Mis materias y comisiones');
+    comisiones.addEventListener('click', () => editarComisiones(k, comisiones, panel));
+    return h('li', { class: 'campus-item' + (activo ? ' activo' : '') },
+      h('div', { class: 'campus-datos' }, h('strong', {}, k.nombre), h('span', {}, k.url || '')),
+      h('div', { class: 'campus-botones' }, activo ? h('span', { class: 'campus-insignia' }, '● Activo') : usar, comisiones),
+      panel);
+  });
+
+  // Agregar un campus, en dos pasos: 1) probar la conexión, 2) elegir tus comisiones y guardar.
+  const v = {};
+  const campoForm = (id, etiqueta, tipo, ayuda, extra = {}) => {
+    const input = h('input', { type: tipo, id: 'f-' + id, autocomplete: 'off', ...extra });
+    return h('div', { class: 'campo' }, h('label', { for: 'f-' + id }, etiqueta), input, ayuda ? h('span', { class: 'ayuda' }, ayuda) : null);
+  };
+  const nuevo = h('div', { class: 'campus-nuevo' });
+  const paso1 = () => {
+    const err = h('p', { class: 'error-form', role: 'alert', 'aria-live': 'polite' });
+    const enviar = h('button', { class: 'boton', type: 'submit' }, 'Probar conexión');
+    const form = h('form', { class: 'formulario campus-form', novalidate: true, onsubmit: async (ev) => {
+      ev.preventDefault();
+      err.textContent = '';
+      // Se lee del DOM y no de los eventos 'input': el autocompletado del navegador no siempre los dispara.
+      form.querySelectorAll('input').forEach((i) => { v[i.id.replace(/^f-/, '')] = i.value; });
+      const falta = [['nombre', 'el nombre'], ['url', 'la dirección'], ['moodle_user', 'el usuario'], ['moodle_pass', 'la contraseña']]
+        .filter(([k]) => !(v[k] || '').trim()).map(([, t]) => t);
+      if (falta.length) { err.textContent = 'Falta completar ' + falta.join(', ') + '.'; return; }
+      if (!!(v.activeia_user || '').trim() !== !!v.activeia_pass) { err.textContent = 'Para Active-IA cargá usuario y contraseña, o dejá los dos vacíos.'; return; }
+      enviar.disabled = true; enviar.textContent = 'Probando la conexión… (puede tardar un minuto)';
+      try {
+        const r = await api('/api/campus/probar', { method: 'POST', body: {
+          nombre: v.nombre, url: v.url, moodle_user: v.moodle_user, moodle_pass: v.moodle_pass,
+          activeia_user: v.activeia_user || '', activeia_pass: v.activeia_pass || '' } });
+        paso2(r);
+      } catch (e) { err.textContent = e.message; enviar.disabled = false; enviar.textContent = 'Probar conexión'; }
+    } },
+    h('fieldset', {}, h('legend', {}, 'Campus'),
+      campoForm('nombre', 'Nombre', 'text', 'Como querés verlo en la lista. Ej.: «UTN Mendoza».'),
+      campoForm('url', 'Dirección del campus', 'url', 'La URL de tu Moodle. Ej.: https://campus.miuniversidad.edu.ar', { placeholder: 'https://' }),
+      campoForm('moodle_user', 'Usuario del campus', 'text'),
+      campoForm('moodle_pass', 'Contraseña del campus', 'password')),
+    h('fieldset', {}, h('legend', {}, 'Active-IA (opcional)'),
+      h('p', { class: 'meta', style: 'margin:0' }, 'Si en Active-IA usás otro usuario para este campus, cargalo acá. Si no corregís con Active-IA, dejalo vacío.'),
+      campoForm('activeia_user', 'Usuario de Active-IA', 'text'),
+      campoForm('activeia_pass', 'Contraseña de Active-IA', 'password')),
+    h('p', { class: 'meta', style: 'margin:0' }, 'Primero se prueba el ingreso. Después vas a elegir cuáles son tus materias y comisiones. Los datos quedan sólo en esta computadora.'),
+    err, h('div', {}, enviar));
+    nuevo.replaceChildren(form);
+    Object.entries(v).forEach(([k, val]) => { const i = form.querySelector('#f-' + k); if (i) i.value = val; });
+  };
+  const paso2 = (r) => {
+    const sel = selectorComisiones(r.cursos);
+    const err = h('p', { class: 'error-form', role: 'alert', 'aria-live': 'polite' });
+    const guardar = h('button', { class: 'boton', type: 'button' }, 'Guardar campus');
+    const volver = h('button', { class: 'boton secundario', type: 'button', onclick: paso1 }, 'Volver');
+    guardar.addEventListener('click', async () => {
+      err.textContent = '';
+      const s = sel.seleccion();
+      if (!s.some((x) => x.group_ids.length)) { err.textContent = 'Elegí al menos una comisión.'; return; }
+      guardar.disabled = true; guardar.textContent = 'Guardando…';
+      try {
+        E.campus = await api('/api/campus', { method: 'POST', body: { token: r.token, seleccion: s } });
+        await recargar();
+        location.hash = '#/';
+      } catch (e) { err.textContent = e.message; guardar.disabled = false; guardar.textContent = 'Guardar campus'; }
+    });
+    nuevo.replaceChildren(
+      h('p', { class: 'meta', role: 'status' }, '✓ La conexión funcionó.'),
+      h('h3', {}, '¿Cuáles son tus materias y comisiones?'),
+      r.nota ? h('p', { class: 'aviso' }, r.nota) : h('p', { class: 'meta', style: 'margin:0 0 8px' }, 'Marqué las que figuran a tu cargo. Podés cambiarlas.'),
+      sel.nodo, err, h('div', { class: 'botones' }, guardar, volver));
+  };
+  paso1();
+
+  montar(
+    h('button', { class: 'volver', type: 'button', onclick: () => { location.hash = '#/'; } }, '← Volver al inicio'),
+    h('h1', {}, 'Campus'),
+    h('p', { class: 'meta', style: 'font-size:15px' }, 'Las materias, comisiones y acciones dependen del campus activo. Elegí con cuál trabajar, definí cuáles son tus comisiones o sumá otro campus.'),
+    lista.length ? h('ul', { class: 'campus-lista' }, items) : h('p', { class: 'aviso' }, 'Todavía no hay ningún campus dado de alta.'),
+    msg,
+    h('h2', { style: 'margin-top:32px' }, 'Agregar un campus'),
+    nuevo,
   );
 }
 
